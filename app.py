@@ -186,7 +186,7 @@ def main():
         if query:
             if resources["search"]:
                 search_ins = None if sel_insurer == "All" else sel_insurer
-                ans, docs = analysis.local_rag_query(query, resources["search"], resources["rag_llm"], top_k)
+                ans, docs = analysis.local_rag_query(query, resources["search"], resources["rag_llm"], top_k, insurer=search_ins)
                 
                 st.subheader("🤖 Qwen2.5 LLM Answer")
                 st.write(ans)

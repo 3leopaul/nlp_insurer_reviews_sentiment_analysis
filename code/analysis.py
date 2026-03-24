@@ -165,9 +165,9 @@ class FAISSSearchEngine:
             
         return candidates.head(top_k)
 
-def local_rag_query(query, search_engine, llm_pipeline=None, top_k=10):
+def local_rag_query(query, search_engine, llm_pipeline=None, top_k=10, insurer=None):
     """RAG Strategy using Qwen2.5 and FAISS."""
-    retrieved_docs = search_engine.search(query, top_k=top_k)
+    retrieved_docs = search_engine.search(query, insurer=insurer, top_k=top_k)
     
     if retrieved_docs.empty:
         return "Je n'ai pas trouvé d'avis correspondant à votre recherche.", retrieved_docs
