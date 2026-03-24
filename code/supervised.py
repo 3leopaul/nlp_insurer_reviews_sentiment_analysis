@@ -72,6 +72,10 @@ def run_camembert_inference(texts):
     Runs CamemBERT binary classification (from huggingface tblard/tf-allocine).
     Identified by the notebook as the most accurate model for positive/negative discrimination.
     """
+    import tensorflow as tf
+    # Hide GPUs from TensorFlow completely to prevent JIT/XLA compilation errors
+    tf.config.set_visible_devices([], 'GPU')
+    
     from transformers import pipeline, CamembertTokenizer
     BERT_MODEL = 'tblard/tf-allocine'
     logging.info(f'Loading {BERT_MODEL}...')
@@ -82,7 +86,8 @@ def run_camembert_inference(texts):
         model=BERT_MODEL,
         tokenizer=bert_tokenizer,
         truncation=True,
-        max_length=512
+        max_length=512,
+        device=-1
     )
     
     # Process

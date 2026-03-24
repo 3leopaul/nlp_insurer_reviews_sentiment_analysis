@@ -115,12 +115,8 @@ def explain_with_shap(model, tfidf_vec, text, label_index=None):
     import shap
     X_vec = tfidf_vec.transform([text])
     
-    # We create a simple explainer using the background data or we use LinearExplainer
-    # If using LogisticRegression from sklearn, LinearExplainer works perfectly for TF-IDF
-    explainer = shap.LinearExplainer(model, tfidf_vec.transform(np.empty(0))) # Usually needs background data, let's use a dummy explainer for local test
-    # The actual notebook did this:
-    # explainer_shap = shap.LinearExplainer(lr_model, X_train_tfidf_sample)
-    # We will simulate the shap return logic for the UI if real explainer is unavailable
+    # We will compute feature importances locally using logistic regression weights 
+    # to avoid needing the full training background data for shap.LinearExplainer
     
     # We will compute feature importances locally if LinearExplainer isn't easily initialized
     coef = model.coef_
@@ -128,7 +124,7 @@ def explain_with_shap(model, tfidf_vec, text, label_index=None):
         if label_index is None: label_index = 0
         weights = coef[label_index] # Target class
     else:
-        weights = coef[0]
+        weights = coef
         
     features = tfidf_vec.get_feature_names_out()
     nonzero = X_vec.nonzero()[1]

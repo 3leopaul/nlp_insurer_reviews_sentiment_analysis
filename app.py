@@ -77,12 +77,17 @@ def get_ml_models():
     
     # 3. Supervised Models
     try:
-        train_pool = df[df['type'] == 'train'].copy() if 'type' in df.columns else df.copy()
-        train_pool = train_pool.dropna(subset=['note', 'avis_corrected_clean'])
+        from sklearn.model_selection import train_test_split
+        train_pool = df.dropna(subset=['note', 'avis_corrected_clean']).copy()
         train_df = train_pool.sample(min(len(train_pool), 15000), random_state=42)
         
-        X_train, X_test, y_train, y_test = supervised.prepare_modeling_data(train_df, label_col='sentiment')
-        _, _, y_train_stars, y_test_stars = supervised.prepare_modeling_data(train_df, label_col='note')
+        X = train_df['avis_corrected_clean'].astype(str).values
+        y_sent = train_df['sentiment'].values
+        y_note = train_df['note'].values
+        
+        X_train, X_test, y_train_sent, y_test_sent, y_train_stars, y_test_stars = train_test_split(
+            X, y_sent, y_note, test_size=0.2, random_state=42, stratify=y_sent
+        )
         
         # Ridge Regression for Stars (Best 3-class)
         ridge_model, tfidf_vec, mae = supervised.train_ridge_regression(X_train, X_test, y_train_stars, y_test_stars)
@@ -91,7 +96,7 @@ def get_ml_models():
         resources["mae"] = mae
         
         # Logistic Regression for Explainability
-        lr_model, _ = supervised.train_logistic_regression(X_train, X_test, y_train, y_test)
+        lr_model, _ = supervised.train_logistic_regression(X_train, X_test, y_train_sent, y_test_sent)
         resources["lr_model"] = lr_model
 
     except Exception as e:
@@ -207,23 +212,23 @@ def main():
         
         if st.button("Predict Sentiment"):
             if resources["ridge"] and user_input:
-                vec = resources["tfidf"]
-                X_in = vec.transform([user_input])
+                # 1. Provide the same preprocessing used during training
+                cleaned_text = preprocessing.clean_text(user_input)
                 
-                # Predict Stars
+                vec = resources["tfidf"]
+                X_in = vec.transform([cleaned_text])
+                
+                # 2. Predict Stars (Continuous)
                 pred_stars = resources["ridge"].predict(X_in)[0]
                 pred_sentiment = supervised.stars_to_sentiment(pred_stars)
                 
                 st.metric("Predicted Stars (Continuous)", f"{pred_stars:.2f} ⭐", delta=pred_sentiment, delta_color="off")
                 
-                # SHAP Explanation via LR
-                st.subheader("🔍 Local Feature Importance (Text Coefficients)")
+                # 3. Explain the exact Ridge star prediction
+                st.subheader("🔍 Local Feature Importance (Impact on Stars)")
                 try:
-                    # Target the predicted class index in LR
-                    lr_classes = list(resources["lr_model"].classes_)
-                    label_idx = lr_classes.index(pred_sentiment) if pred_sentiment in lr_classes else 0
-                    
-                    shap_df = analysis.explain_with_shap(resources["lr_model"], vec, user_input, label_idx)
+                    # By passing the ridge model, we get the direct impact on the star rating (positive impact = higher stars)
+                    shap_df = analysis.explain_with_shap(resources["ridge"], vec, cleaned_text)
                     st.dataframe(shap_df.head(10))
                 except Exception as e:
                     st.error(f"Explanation failed: {e}")

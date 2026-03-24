@@ -49,20 +49,23 @@ def correct_with_languagetool(text, tool):
         
     return language_tool_python.utils.correct(text, filtered_matches)
 
-def clean_text(text):
+def clean_text(text, lemmatize=False):
     """Cleans French text (lowercase, regex out HTML/URLs, lemmatize, remove stopwords)."""
     if not isinstance(text, str):
         return ""
     text = text.lower()
     text = re.sub(r"https?://\S+|www\.\S+|<[^>]+>", " ", text)
-    text = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9_ ]", " ", text)
+    text = re.sub(r"[^a-zàâäéèêëîïôûùûüçœæ\s]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     
-    if nlp is not None:
-        doc = nlp(text)
-        lemmas = [token.lemma_ for token in doc if token.text not in stop_words_fr and len(token.text) > 1]
-        return " ".join(lemmas)
-    return text
+    tokens = text.split()
+    tokens = [t for t in tokens if t not in stop_words_fr and len(t) > 2]
+
+    if lemmatize and nlp is not None:
+        doc = nlp(" ".join(tokens))
+        tokens = [token.lemma_ for token in doc if not token.is_space]
+        
+    return " ".join(tokens)
 
 def run_full_pipeline(df):
     """Executes the preprocessing pipeline from the notebook."""
