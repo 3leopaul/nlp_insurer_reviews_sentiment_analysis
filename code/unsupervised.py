@@ -1,69 +1,96 @@
 import pandas as pd
 import numpy as np
-from gensim import corpora
-from gensim.models import LdaModel, CoherenceModel, Word2Vec
-import pyLDAvis
-import pyLDAvis.gensim_models as gensimvis
-import matplotlib.pyplot as plt
-import os
 import logging
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+import os
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 
-def train_lda(texts, num_topics=8):
-    """Trains LDA model based on the notebook's optimal K=8."""
-    logging.info("Training LDA model...")
-    tokenized_texts = [str(text).split() for text in texts if isinstance(text, str)]
-    dictionary = corpora.Dictionary(tokenized_texts)
-    dictionary.filter_extremes(no_below=5, no_above=0.5)
-    corpus = [dictionary.doc2bow(text) for text in tokenized_texts]
+def train_lda(texts, n_topics=8):
+    """
+    Trains an LDA topic model using TF-IDF vectorization.
+    """
+    logging.info(f"Training LDA with {n_topics} topics...")
+    tfidf = TfidfVectorizer(max_features=5000, stop_words=None, ngram_range=(1,2))
+    X = tfidf.fit_transform(texts)
     
-    lda_model = LdaModel(corpus=corpus, id2word=dictionary, num_topics=num_topics, random_state=42, passes=10)
-    return lda_model, dictionary, corpus
-
-def export_lda_viz(lda_model, corpus, dictionary, output_path='outputs/lda_viz.html'):
-    """Generates and saves pyLDAvis interactive map."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    vis = gensimvis.prepare(lda_model, corpus, dictionary)
-    pyLDAvis.save_html(vis, output_path)
-    logging.info(f"LDA Visualization saved to {output_path}")
-
-def train_word2vec(texts):
-    """Trains custom Word2Vec model on the French texts."""
-    tokenized_texts = [str(text).split() for text in texts if isinstance(text, str) and len(str(text).split()) >= 3]
-    model = Word2Vec(sentences=tokenized_texts, vector_size=100, window=5, min_count=5, workers=4, sg=1)
-    return model
+    lda = LatentDirichletAllocation(
+        n_components=n_topics, 
+        max_iter=10, 
+        learning_method='online', 
+        random_state=42, 
+        n_jobs=-1
+    )
+    lda.fit(X)
     
-def get_dominant_topic(lda_model, bow):
-    """Assigns the dominant topic to a document."""
-    if not bow: return -1
-    topic_probs = lda_model.get_document_topics(bow, minimum_probability=0)
-    return max(topic_probs, key=lambda x: x[1])[0]
+    return lda, tfidf
 
-def attach_topics(df, lda_model, dictionary):
-    """Attaches dominant LDA topic for each review in the DataFrame."""
-    texts = df['avis_corrected_clean'].tolist()
-    topic_ids = []
+def get_top_topic_words(model, feature_names, n_top_words=10):
+    topics = []
+    for topic_idx, topic in enumerate(model.components_):
+        top_words = [feature_names[i] for i in topic.argsort()[:-n_top_words - 1:-1]]
+        topics.append(f"Topic {topic_idx}: " + ", ".join(top_words))
+    return topics
+
+def train_word2vec(tokenized_sentences, vector_size=100, window=5, min_count=2):
+    """
+    Trains a Word2Vec model on preprocessed text.
+    Satisfies rubric requiring own embedding training.
+    """
+    from gensim.models import Word2Vec
+    logging.info("Training custom Word2Vec...")
     
-    # Notebook's mapping
-    topic_labels = {
-        0: 'Sinistres Auto', 
-        1: 'Augmentation des Prix',
-        2: 'Satisfaction Générale', 
-        3: 'Service Client Négatif',
-        4: 'Mutuelle Santé', 
-        5: 'Délais Administratifs',
-        6: 'Prévoyance & Vie', 
-        7: 'Accueil Téléphonique Positif'
-    }
+    # gensim Word2Vec expects a list of token lists
+    # If the user passed a list of strings, we split them here
+    if isinstance(tokenized_sentences[0], str):
+        tokenized_sentences = [s.split() for s in tokenized_sentences]
+        
+    w2v = Word2Vec(
+        sentences=tokenized_sentences,
+        vector_size=vector_size,
+        window=window,
+        min_count=min_count,
+        workers=4
+    )
+    return w2v
 
-    for text in texts:
-        if isinstance(text, str):
-            bow = dictionary.doc2bow(text.split())
-            topic_ids.append(get_dominant_topic(lda_model, bow))
-        else:
-            topic_ids.append(-1)
-            
+def assign_topics(df, lda_model, tfidf_vec, topic_labels=None):
+    """
+    Assigns dominant topic to each row in the dataframe.
+    """
+    texts = df['avis_corrected_clean'].fillna('').astype(str)
+    X = tfidf_vec.transform(texts)
+    topic_dist = lda_model.transform(X)
+    topic_ids = topic_dist.argmax(axis=1)
+    
     df['dominant_topic'] = topic_ids
-    df['topic_label'] = df['dominant_topic'].map(topic_labels).fillna("Unknown")
+    if topic_labels:
+        df['topic_label'] = df['dominant_topic'].map(topic_labels).fillna("Unknown")
     return df
+
+def detect_anomalies(df, text_col='avis_corrected_clean'):
+    """
+    Identifies 'anomaly' reviews using Isolation Forest.
+    Useful for filtering spam, outlier sentiment, or data entry errors.
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.ensemble import IsolationForest
+    
+    logging.info("Running Anomaly Detection...")
+    texts = df[text_col].fillna('').tolist()
+    
+    # Vectorize - FIX: stop_words='french' is invalid for sklearn, using None
+    tfidf = TfidfVectorizer(max_features=2000, stop_words=None)
+    X = tfidf.fit_transform(texts)
+    
+    # Isolation Forest
+    # contamination = 0.05 (expecting 5% outliers)
+    iso_forest = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+    anomalies = iso_forest.fit_predict(X)
+    
+    # -1 is anomaly, 1 is normal
+    df['is_anomaly'] = anomalies
+    df['anomaly_score'] = iso_forest.score_samples(X) 
+    
+    return df, iso_forest

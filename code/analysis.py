@@ -132,26 +132,71 @@ def explain_with_shap(model, tfidf_vec, text, label_index=None):
     contributions = {features[idx]: float(X_vec[0, idx] * weights[idx]) for idx in nonzero}
     return pd.DataFrame(list(contributions.items()), columns=['word', 'impact']).sort_values('impact', key=abs, ascending=False)
     
+class BM25SearchEngine:
+    """Keyword-based search using BM25 algorithm with persistence."""
+    def __init__(self, df, cache_path=None):
+        import pickle
+        import os
+        from rank_bm25 import BM25Okapi
+        
+        self.df = df.dropna(subset=['avis_corrected_clean']).copy().reset_index(drop=True)
+        
+        if cache_path and os.path.exists(cache_path):
+            logging.info(f"Loading cached BM25 index from {cache_path}...")
+            with open(cache_path, 'rb') as f:
+                self.bm25 = pickle.load(f)
+        else:
+            logging.info("Building new BM25 index...")
+            tokenized_corpus = [str(doc).lower().split() for doc in self.df['avis_corrected_clean']]
+            self.bm25 = BM25Okapi(tokenized_corpus)
+            if cache_path:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(self.bm25, f)
+
+    def search(self, query, insurer=None, top_k=10):
+        tokenized_query = str(query).lower().split()
+        scores = self.bm25.get_scores(tokenized_query)
+        
+        candidates = self.df.copy()
+        candidates['similarity_score'] = scores
+        
+        if insurer and insurer != "All":
+            candidates = candidates[candidates['assureur'] == insurer]
+            
+        return candidates.sort_values('similarity_score', ascending=False).head(top_k)
+
 class FAISSSearchEngine:
-    """FAISS Semantic Search using paraphrase-multilingual-MiniLM-L12-v2."""
-    def __init__(self, df):
+    """FAISS Semantic Search with disk persistence."""
+    def __init__(self, df, index_path=None, embs_path=None):
+        import os
         self.df = df
         self.sentences = df['avis_corrected_clean'].dropna().tolist()
-        
-        logging.info("Initializing FAISS with Multilingual SBERT...")
-        self.embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-        self.corpus_embeddings = self.embedder.encode(self.sentences, convert_to_tensor=False, normalize_embeddings=True)
-        
-        self.index = faiss.IndexFlatIP(self.corpus_embeddings.shape[1])
-        self.index.add(self.corpus_embeddings.astype('float32'))
-        
-        # We need a proper map to map the filtered texts back to the original rows
         self.doc_map = df.dropna(subset=['avis_corrected_clean']).copy().reset_index(drop=True)
+        
+        logging.info("Initializing SBERT for Semantic Search...")
+        self.embedder = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        
+        if index_path and embs_path and os.path.exists(index_path) and os.path.exists(embs_path):
+            logging.info(f"Loading cached FAISS index and embeddings...")
+            self.index = faiss.read_index(index_path)
+            self.corpus_embeddings = np.load(embs_path)
+        else:
+            logging.info("Encoding corpus (this may take a few minutes on CPU)...")
+            self.corpus_embeddings = self.embedder.encode(self.sentences, convert_to_tensor=False, normalize_embeddings=True)
+            self.index = faiss.IndexFlatIP(self.corpus_embeddings.shape[1])
+            self.index.add(self.corpus_embeddings.astype('float32'))
+            
+            if index_path and embs_path:
+                os.makedirs(os.path.dirname(index_path), exist_ok=True)
+                faiss.write_index(self.index, index_path)
+                np.save(embs_path, self.corpus_embeddings)
 
     def search(self, query, insurer=None, top_k=10):
         """Semantic Search."""
         query_embedding = self.embedder.encode([query], normalize_embeddings=True).astype('float32')
-        scores, semantic_indices = self.index.search(query_embedding, 50)  # Over-fetch for filtering
+        # IP index search gives scores in [0, 1] for normalized embeddings
+        scores, semantic_indices = self.index.search(query_embedding, 50) 
         
         candidates = self.doc_map.iloc[semantic_indices[0]].copy()
         candidates['similarity_score'] = scores[0]
@@ -162,11 +207,15 @@ class FAISSSearchEngine:
         return candidates.head(top_k)
 
 def local_rag_query(query, search_engine, llm_pipeline=None, top_k=10, insurer=None):
-    """RAG Strategy using Qwen2.5 and FAISS."""
-    retrieved_docs = search_engine.search(query, insurer=insurer, top_k=top_k)
-    
+    """Legacy wrapper for backward compatibility."""
+    docs = search_engine.search(query, insurer=insurer, top_k=top_k)
+    ans = generate_rag_response(query, docs, llm_pipeline)
+    return ans, docs
+
+def generate_rag_response(query, retrieved_docs, llm_pipeline=None):
+    """Generates LLM synthesis from retrieved documents."""
     if retrieved_docs.empty:
-        return "Je n'ai pas trouvé d'avis correspondant à votre recherche.", retrieved_docs
+        return "Je n'ai pas trouvé d'avis correspondant à votre recherche."
         
     context = ""
     for i, (_, row) in enumerate(retrieved_docs.iterrows()):
@@ -191,10 +240,8 @@ CONTEXTE:
     if llm_pipeline:
         try:
             result = llm_pipeline(prompt, max_new_tokens=400, do_sample=True, temperature=0.1, return_full_text=False)
-            response = result[0]['generated_text'].split("<|im_start|>assistant\n")[-1].strip()
+            return result[0]['generated_text'].split("<|im_start|>assistant\n")[-1].strip()
         except Exception as e:
-            response = f"Erreur de génération : {e}"
+            return f"Erreur de génération : {e}"
     else:
-        response = "Modèle LLM non chargé. Lisez les avis ci-dessous."
-        
-    return response, retrieved_docs
+        return "Modèle LLM non chargé. Lisez les avis ci-dessous."
